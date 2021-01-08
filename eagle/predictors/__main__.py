@@ -32,6 +32,17 @@ from . import infer
 from . import dataset as dataset_mod
 
 
+### injected code
+def prepare_tensors(gs, latencies, model_module, *args, **kwargs):
+    adjacency = torch.stack([g[0] for g in gs]).double().cuda()
+    features = torch.stack([g[1] for g in gs]).double().cuda()
+    latency = torch.tensor(latencies).unsqueeze(1).double().cuda()
+    return adjacency, features, latency, None
+
+infer.prepare_tensors = prepare_tensors
+### end of injected code
+
+
 def _train(model_module, model, gs, latencies, optimizer, criterion, normalize=False, augments=None):
     adjacency, features, latency, aug = infer.prepare_tensors(gs, latencies, model_module, model.binary_classifier, normalize, augments=augments)
 
@@ -451,6 +462,9 @@ if __name__ == '__main__':
     parser.add_argument('--sample_best', action='store_true')
     parser.add_argument('--sample_best2', action='store_true')
     parser.add_argument('--reset_last', action='store_true', help='Reset last layer (only applicable if checkpoint is loaded)')
+
+    parser.add_argument('--leave_one_out', type=str)
+    parser.add_argument('--dataset_path', type=str)
     args = parser.parse_args()
 
     if args.uid is not None:
@@ -538,6 +552,47 @@ if __name__ == '__main__':
                         augments.append(d)
             else:
                 augments = None
+
+### injected code
+        def get_dataset_subset(dataset, subset_name):
+            if isinstance(subset_name, str):
+                subset_name = [subset_name]
+            result = []
+            for k in dataset.keys():
+                if any([k.startswith(n) for n in subset_name]):
+                    result.append(dataset[k])
+            return result
+
+        def transform_to_pairs(triplets):
+            return [[[t[0], t[1]], t[2]] for t in triplets]
+
+        class DummyDataset:
+            def __init__(self, train_set, valid_set, full_dataset):
+                train_features = torch.cat([sample[0][1] for sample in train_set]).numpy()
+                from sklearn.preprocessing import StandardScaler
+                transformer = StandardScaler().fit(train_features)
+                for dataset in [train_set, valid_set, full_dataset]:
+                    for x, _ in dataset:
+                        x[1] = torch.tensor(transformer.transform(x[1].numpy()))
+                self.train_set = train_set
+                self.valid_set = valid_set
+                self.full_dataset = full_dataset
+                self.valid_pts = None
+
+        import random
+        all_types = ['alex', 'mobilenetv1', 'vgg', 'mobilenetv2', 'nasbench201']
+        assert args.leave_one_out in all_types
+        train_types = [t for t in all_types if t != args.leave_one_out]
+        test_type = args.leave_one_out
+        dataset = pickle.load(open(args.dataset_path, 'rb'))
+        train_plus_valid = transform_to_pairs(get_dataset_subset(dataset, train_types))
+        train_set = random.sample(train_plus_valid, 2000)
+        train_set, valid_set = train_set[:1500], train_set[1500:]
+        test_set = transform_to_pairs(get_dataset_subset(dataset, test_type))
+        dataset = DummyDataset(train_set, valid_set, test_set)
+
+### end of injection
+
 
         explored_models = dataset.train_set
         if not args.eval:
